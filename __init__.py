@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""legal_engine — 법정 동역학 시뮬레이션 엔진 (v0.1.1)
+"""legal_engine — 법정 동역학 시뮬레이션 엔진 (v0.3.0)
 
 ionia 철학 레이어 내 응용 계층.
 Observer + KEMET + Pharaoh 시스템과 연동해
@@ -26,7 +26,7 @@ from .legal_observer import observe, diagnose
 from .legal_engine import LegalEngine
 from .pharaoh_decree_legal import JudicialEvent, JudicialCourt, recommend_event
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __all__ = [
     "LegalEngine",
     "LegalMutable", "LegalParams", "LegalContext",
