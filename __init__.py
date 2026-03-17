@@ -26,7 +26,7 @@ from .legal_observer import observe, diagnose
 from .legal_engine import LegalEngine
 from .pharaoh_decree_legal import JudicialEvent, JudicialCourt, recommend_event
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"
 __all__ = [
     "LegalEngine",
     "LegalMutable", "LegalParams", "LegalContext",

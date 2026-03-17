@@ -1,13 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-legal_dynamics.py — 법정 동역학 ODE + RK4 + 이벤트 충격
+legal_dynamics.py — 법정 동역학 ODE + RK4 + 이벤트 충격  (v0.2.0)
 
 5개 상태 변수 연립 ODE:
-    dT/dt  truth_score      — 진실 발현·억압·수렴
+    dT/dt  truth_score      — 진실 발현·억압·수렴 (+배심 숙의 보조)
     dE/dt  evidence_integrity — 증거 강화·감쇠·변호 도전
     dL/dt  legal_coherence  — 법리 판례 수렴·허점 왜곡
     dB/dt  bias_total       — 전관예우·정치 압력·개혁·감쇠
     dP/dt  procedural_score — 절차 회복·편향 훼손
+
+v0.2.0 개선:
+    - revolving 계산을 compute_derived의 revolving_door_index 공식과 통일
+      revolving = corruption × (1 − impartiality) × (0.5 + skill × 0.5)
+    - dT/dt에 배심원 숙의 품질(deliberation_quality × weight) 반영
+      → 배심제 적용 사건에서 숙의가 잘 이루어질수록 진실 발현 보조
 """
 from __future__ import annotations
 
@@ -46,12 +52,20 @@ def _derivatives(
         * j.impartiality
         * max(0.0, 1.0 - B * params.beta_suppress)
     )
+    # 배심 숙의 보조: 배심원이 있고(weight > 0) 숙의 품질이 높을수록 진실 발현 강화
+    #   한국(weight=0.15): +0.15 × 0.60 × 0.08 ≈ +0.7% 보조 (소폭)
+    #   완전 배심제(weight=1.0): +1.0 × 0.70 × 0.08 ≈ +5.6% 보조 (유의미)
+    jury_boost = ctx.jury.weight * ctx.jury.deliberation_quality * 0.08
+    truth_reveal = truth_reveal * (1.0 + jury_boost)
+
     # 억압: 편향 × 검사 조작 경향 + 정치 개입
     truth_suppress = (
         B * params.beta_suppress * pr.manipulation_tendency
         + ctx.political_interference * 0.08
     )
     # 자연 수렴: 진실(actual_guilt)으로의 회귀 (절차 × 공정성 × 거리)
+    #   actual_guilt = 시뮬레이션만 아는 실제 유죄 정도
+    #   T → actual_guilt 수렴 = "진실이 결국 드러난다"
     truth_converge = (
         params.gamma_converge
         * (df.actual_guilt - T)
@@ -71,12 +85,12 @@ def _derivatives(
     )
     # 자연 감쇠
     evidence_decay = params.epsilon_decay * E
-    # 변호 도전: 스킬 × 허점활용 비례
+    # 변호 도전: 스킬 × 허점활용 비례 (실제 존재하는 증거에만 도전)
     defense_challenge = (
         params.zeta_defense
         * de.skill_level
         * (de.loophole_exploitation * 0.5 + 0.5)
-        * E  # 실제로 존재하는 증거에만 도전 가능
+        * E
     )
     dE = evidence_build - evidence_decay - defense_challenge
     dE = _clamp(dE, -0.30, 0.30)
@@ -85,7 +99,7 @@ def _derivatives(
     # 판례 수렴: 법률 계층 정합성으로 회귀
     hier = ctx.hierarchy.hierarchy_integrity()
     hierarchy_pull = params.eta_precedent * (hier - L)
-    # 허점 왜곡: 변호사 허점활용 × 법리 모호성
+    # 허점 왜곡: 변호사 허점활용 × 법리 모호성(낮은 doctrine_score일수록 왜곡 용이)
     loophole_distort = (
         params.theta_loophole
         * de.loophole_exploitation
@@ -97,8 +111,10 @@ def _derivatives(
     dL = _clamp(dL, -0.25, 0.25)
 
     # ── dB/dt — 편향 총합 ────────────────────────────────────────────────────
+    # 전관예우 지수 — compute_derived와 동일한 3요소 공식:
+    #   판사 부패 × 공정성 결여 × 변호사 연계 역량
+    revolving = j.corruption_risk * (1.0 - j.impartiality) * (0.5 + de.skill_level * 0.5)
     # 편향 증가: 전관예우 + 정치압력 + 미디어 압박 (제도 저항에 비례 감쇠)
-    revolving = j.corruption_risk * (1.0 - j.impartiality)
     bias_increase = (
         params.iota_corrupt
         * (revolving + pr.political_pressure * 0.30 + ctx.media_pressure * 0.20)
@@ -198,7 +214,7 @@ def apply_legal_event(
         precedent_establish    새 판례 확립
         constitutional_review  위헌 심사 청구
         plea_bargain           플리바게닝
-        procedural_violation   절차 위반
+        procedural_violation   절차 위반 (이벤트 충격 — 상태 플래그와 구분)
         star_defense           스타 변호사 투입 (재력 비례)
     """
     ns  = state.copy()

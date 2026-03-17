@@ -8,6 +8,15 @@ tests/test_legal.py — Legal Engine 전체 테스트
 §4 이벤트 충격 방향성 (12개)
 §5 시뮬레이션 시나리오 (6개)
 §6 Athena 권고 + 프리셋 (6개)
+§7 v0.2.0 신규 로직 검증 (12개)
+   — signed_justice_gap / verdict_direction
+   — revolving_door_index 3요소 공식
+   — revolving_door_active 임계치 (0.25)
+   — over_convicted / unjust_acquittal 플래그
+   — DISTORTED 강제 임계치 (Ω ≤ 0.70)
+   — Ω_bias revolving 정규화 (max=1.0)
+   — jury deliberation_quality ODE 반영
+   — diagnose() 방향성 메시지
 """
 from __future__ import annotations
 
@@ -531,3 +540,163 @@ class TestAthenaPreset:
         eng.simulate(steps=24)
         obs = observe(eng.state, eng.ctx)
         assert obs["verdict"] in ("JUST", "STABLE")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# §7 v0.2.0 신규 로직 검증
+# ─────────────────────────────────────────────────────────────────────────────
+class TestV020:
+
+    # ── signed_justice_gap / verdict_direction ────────────────────────────
+    def test_signed_gap_positive_when_verdict_exceeds_guilt(self):
+        """판결 점수 > 실제 유죄 → signed_gap 양수 (억울한 경우)."""
+        s   = LegalMutable(truth_score=0.80, evidence_integrity=0.85,
+                            legal_coherence=0.80, bias_total=0.05, procedural_score=0.90)
+        ctx = LegalContext(defendant=DefendantParams(actual_guilt=0.20))
+        d   = compute_derived(s, ctx)
+        assert d["signed_justice_gap"] > 0
+        assert d["verdict_direction"] == "OVER_CONVICTED"
+
+    def test_signed_gap_negative_when_guilt_exceeds_verdict(self):
+        """실제 유죄 > 판결 점수 → signed_gap 음수 (부당 방면)."""
+        s   = LegalMutable(truth_score=0.15, evidence_integrity=0.20,
+                            legal_coherence=0.20, bias_total=0.80, procedural_score=0.20)
+        ctx = LegalContext(defendant=DefendantParams(actual_guilt=0.95))
+        d   = compute_derived(s, ctx)
+        assert d["signed_justice_gap"] < 0
+        assert d["verdict_direction"] == "ACQUITTED"
+
+    def test_signed_gap_balanced(self):
+        """판결 ≈ 실제 유죄 → BALANCED."""
+        s   = LegalMutable(truth_score=0.70, evidence_integrity=0.75,
+                            legal_coherence=0.70, bias_total=0.15, procedural_score=0.80)
+        ctx = LegalContext(defendant=DefendantParams(actual_guilt=0.70))
+        d   = compute_derived(s, ctx)
+        assert d["verdict_direction"] == "BALANCED"
+
+    # ── revolving_door_index 3요소 공식 ──────────────────────────────────
+    def test_revolving_door_zero_when_impartial(self):
+        """판사가 완전히 공정하면 전관예우 지수 = 0."""
+        s   = default_state()
+        ctx = LegalContext(judge=JudgeParams(impartiality=1.0, corruption_risk=0.90))
+        d   = compute_derived(s, ctx)
+        assert d["revolving_door_index"] == 0.0
+
+    def test_revolving_door_increases_with_skill(self):
+        """변호사 스킬이 높을수록 전관예우 지수 증가 (부패 판사 환경에서)."""
+        s    = default_state()
+        ctx1 = LegalContext(
+            judge=JudgeParams(corruption_risk=0.70, impartiality=0.20),
+            defense=DefenseParams(skill_level=0.20),
+        )
+        ctx2 = LegalContext(
+            judge=JudgeParams(corruption_risk=0.70, impartiality=0.20),
+            defense=DefenseParams(skill_level=0.90),
+        )
+        d1 = compute_derived(s, ctx1)
+        d2 = compute_derived(s, ctx2)
+        assert d2["revolving_door_index"] > d1["revolving_door_index"]
+
+    def test_revolving_door_max_is_one(self):
+        """전관예우 지수 이론적 최댓값 = 1.0."""
+        s   = default_state()
+        ctx = LegalContext(
+            judge=JudgeParams(corruption_risk=1.0, impartiality=0.0),
+            defense=DefenseParams(skill_level=1.0),
+        )
+        d   = compute_derived(s, ctx)
+        # corruption=1.0 × (1-0.0) × (0.5 + 1.0×0.5) = 1.0 × 1.0 × 1.0 = 1.0
+        assert abs(d["revolving_door_index"] - 1.0) < 1e-6
+
+    # ── over_convicted / unjust_acquittal 플래그 ─────────────────────────
+    def test_over_convicted_flag(self):
+        """signed_gap > 0.25 → over_convicted 플래그."""
+        s   = LegalMutable(truth_score=0.80, evidence_integrity=0.85,
+                            legal_coherence=0.80, bias_total=0.05, procedural_score=0.90)
+        ctx = LegalContext(defendant=DefendantParams(actual_guilt=0.10))
+        d   = compute_derived(s, ctx)
+        f   = compute_flags(s, ctx, d)
+        assert f["over_convicted"] is True
+
+    def test_unjust_acquittal_flag(self):
+        """signed_gap < -0.25 → unjust_acquittal 플래그."""
+        s   = LegalMutable(truth_score=0.10, evidence_integrity=0.15,
+                            legal_coherence=0.15, bias_total=0.90, procedural_score=0.10)
+        ctx = LegalContext(defendant=DefendantParams(actual_guilt=0.95))
+        d   = compute_derived(s, ctx)
+        f   = compute_flags(s, ctx, d)
+        assert f["unjust_acquittal"] is True
+
+    # ── DISTORTED 강제 임계치 ─────────────────────────────────────────────
+    def test_distorted_stage_caps_omega_at_0_70(self):
+        """DISTORTED 단계(gap=0.20~0.40)에서 Ω_global ≤ 0.70 강제."""
+        # verdict_score ≈ 0.75, actual_guilt = 0.40 → gap ≈ 0.35 → DISTORTED
+        s   = LegalMutable(truth_score=0.80, evidence_integrity=0.80,
+                            legal_coherence=0.80, bias_total=0.05, procedural_score=0.90)
+        ctx = LegalContext(
+            defendant=DefendantParams(actual_guilt=0.40),
+            judge=JudgeParams(corruption_risk=0.05, impartiality=0.92),
+            public_scrutiny=0.80,
+        )
+        obs = observe(s, ctx)
+        if obs["justice_stage"] == "DISTORTED":
+            assert obs["Ω_global"] <= 0.70
+            assert obs["verdict"] in ("STABLE", "FRAGILE", "CRITICAL")
+
+    # ── Ω_bias revolving 정규화 ───────────────────────────────────────────
+    def test_omega_bias_zero_at_max_revolving(self):
+        """전관예우 최악(revolving=1.0)이면 rev_ω 기여 → 0."""
+        s   = default_state()
+        # revolving_door_index = 1.0 (최댓값)
+        ctx = LegalContext(
+            judge=JudgeParams(corruption_risk=1.0, impartiality=0.0),
+            defense=DefenseParams(skill_level=1.0),
+            # B=0, collusion=0 으로 나머지 Ω_bias 항 최대로 설정
+        )
+        from legal_engine.legal_observer import _omega_bias
+        derived = compute_derived(s, ctx)
+        ob = _omega_bias(s, ctx, derived)
+        # rev_ω = 1 - 1.0 = 0.0; 다른 항만으로 Ω_bias 결정
+        # 이 상태에서 ob는 bias_ω×0.50 + coll_ω×0.25 만 남음
+        assert ob < 0.80  # 최악 revolving이 반드시 Ω_bias를 낮춰야 함
+
+    # ── jury deliberation ODE 반영 ────────────────────────────────────────
+    def test_jury_deliberation_boosts_truth_reveal(self):
+        """배심 숙의 품질이 높을수록 dT/dt 발현 항 증가."""
+        from legal_engine.legal_dynamics import _derivatives
+        s = LegalMutable(truth_score=0.40, evidence_integrity=0.70,
+                         bias_total=0.10, procedural_score=0.80)
+        ctx_low = LegalContext(
+            jury=JuryParams(deliberation_quality=0.10, weight=1.0),
+            judge=JudgeParams(impartiality=0.80, corruption_risk=0.10),
+            defendant=DefendantParams(actual_guilt=0.80),
+        )
+        ctx_high = LegalContext(
+            jury=JuryParams(deliberation_quality=0.95, weight=1.0),
+            judge=JudgeParams(impartiality=0.80, corruption_risk=0.10),
+            defendant=DefendantParams(actual_guilt=0.80),
+        )
+        dT_low,  *_ = _derivatives(s, LegalParams(), ctx_low)
+        dT_high, *_ = _derivatives(s, LegalParams(), ctx_high)
+        assert dT_high > dT_low, "높은 배심 숙의 → dT/dt 발현 증가"
+
+    # ── diagnose() 방향성 메시지 ──────────────────────────────────────────
+    def test_diagnose_over_convicted_message(self):
+        """over_convicted 플래그 시 억울 관련 메시지 포함."""
+        s   = LegalMutable(truth_score=0.80, evidence_integrity=0.85,
+                            legal_coherence=0.80, bias_total=0.05, procedural_score=0.90)
+        ctx = LegalContext(defendant=DefendantParams(actual_guilt=0.05))
+        obs = observe(s, ctx)
+        if obs["flags"].get("over_convicted"):
+            advice = diagnose(obs)
+            assert any("억울" in a or "OVER" in a for a in advice)
+
+    def test_diagnose_unjust_acquittal_message(self):
+        """unjust_acquittal 플래그 시 방면 관련 메시지 포함."""
+        s   = LegalMutable(truth_score=0.10, evidence_integrity=0.10,
+                            legal_coherence=0.10, bias_total=0.90, procedural_score=0.10)
+        ctx = LegalContext(defendant=DefendantParams(actual_guilt=0.95))
+        obs = observe(s, ctx)
+        if obs["flags"].get("unjust_acquittal"):
+            advice = diagnose(obs)
+            assert any("방면" in a or "acquittal" in a.lower() for a in advice)

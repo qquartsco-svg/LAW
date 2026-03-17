@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-legal_state.py — 법정 동역학 상태 변수 정의
+legal_state.py — 법정 동역학 상태 변수 정의  (v0.2.0)
 
 RK4 적분 대상 (LegalMutable):
     truth_score       T — 진실이 법정에서 드러난 정도
@@ -12,6 +12,14 @@ RK4 적분 대상 (LegalMutable):
 핵심 통찰:
     숨겨진 진실 ctx.defendant.actual_guilt 와 판결 verdict_score 의 괴리
     = justice_gap = 사법 왜곡의 정도.
+
+    signed_justice_gap = verdict_score − actual_guilt
+        양수(+): 실제보다 높은 유죄 판결 → 억울한 경우 (OVER_CONVICTED)
+        음수(−): 실제보다 낮은 유죄 판결 → 부당 방면 (ACQUITTED)
+
+    revolving_door_index = corruption × (1 − impartiality) × (0.5 + skill × 0.5)
+        판사 부패 × 공정성 결여 × 변호사 연계 역량 — 전관예우의 3요소
+        이론적 최댓값: 1.0 × 1.0 × 1.0 = 1.0
 """
 from __future__ import annotations
 
@@ -52,7 +60,7 @@ class ProsecutorParams:
 @dataclass
 class DefenseParams:
     """변호사(피고측) 파라미터."""
-    skill_level:           float = 0.50  # 법률 기술·경험
+    skill_level:           float = 0.50  # 법률 기술·경험 (전관예우 연계 역량 포함)
     loophole_exploitation: float = 0.30  # 법의 허점 활용도
     unethical_tendency:    float = 0.10  # 비윤리적 전략 경향
 
@@ -62,7 +70,7 @@ class JuryParams:
     """배심원 파라미터 (배심제 미적용 시 weight=0)."""
     emotional_bias:      float = 0.30  # 감정적 편향
     media_influence:     float = 0.30  # 미디어/여론 영향도
-    deliberation_quality: float = 0.60  # 숙의 품질
+    deliberation_quality: float = 0.60  # 숙의 품질 — 높을수록 진실 발현 보조
     weight:              float = 0.0   # 배심원 판결 반영 비중 (한국=0.15, 미국=1.0)
 
 
@@ -192,15 +200,32 @@ def compute_derived(state: LegalMutable, ctx: LegalContext) -> Dict[str, Any]:
         T * 0.35 + E * 0.30 + L * 0.20 + P * 0.15 - B * 0.35
     )
 
-    # 정의 괴리: 실제 유죄와 판결 점수의 거리
+    # 정의 괴리: 실제 유죄와 판결 점수의 거리 (절댓값 — 방향 없음)
     justice_gap = abs(verdict_score - actual_guilt)
+
+    # 방향 있는 정의 괴리:
+    #   양수(+) → 실제보다 높은 유죄 판결 (억울한 경우, OVER_CONVICTED)
+    #   음수(−) → 실제보다 낮은 유죄 판결 (부당 방면, ACQUITTED)
+    signed_justice_gap = verdict_score - actual_guilt
+
+    # 판결 방향
+    if signed_justice_gap > 0.20:
+        verdict_direction = "OVER_CONVICTED"   # 억울한 유죄
+    elif signed_justice_gap < -0.20:
+        verdict_direction = "ACQUITTED"         # 부당 방면
+    else:
+        verdict_direction = "BALANCED"          # 균형 범위
 
     # 헌법 계층 온전성
     constitutional_integrity = ctx.hierarchy.hierarchy_integrity()
 
-    # 전관예우 지수: 판사 부패 × 변호사 스킬
-    revolving_door_index = (
-        ctx.judge.corruption_risk * ctx.defense.skill_level * 0.5
+    # 전관예우 지수 — 3요소 통합:
+    #   판사 부패 위험 × 공정성 결여 × 변호사 연계 역량
+    #   이론적 최댓값: 1.0 × 1.0 × (0.5 + 0.5) = 1.0
+    revolving_door_index = _clamp(
+        ctx.judge.corruption_risk
+        * (1.0 - ctx.judge.impartiality)
+        * (0.5 + ctx.defense.skill_level * 0.5)
     )
 
     # 검-판 유착 위험
@@ -228,6 +253,8 @@ def compute_derived(state: LegalMutable, ctx: LegalContext) -> Dict[str, Any]:
     return {
         "verdict_score":          round(verdict_score, 4),
         "justice_gap":            round(justice_gap, 4),
+        "signed_justice_gap":     round(signed_justice_gap, 4),
+        "verdict_direction":      verdict_direction,
         "justice_stage":          justice_stage,
         "constitutional_integrity": round(constitutional_integrity, 4),
         "revolving_door_index":   round(revolving_door_index, 4),
@@ -243,7 +270,25 @@ def compute_flags(
     ctx: LegalContext,
     derived: Dict[str, Any],
 ) -> Dict[str, bool]:
-    """11개 위험 플래그."""
+    """13개 위험 플래그.
+
+    § 기본 플래그 (11개):
+        evidence_tampered    증거 신뢰성 붕괴
+        bias_critical        편향 임계
+        procedural_violation 절차 위반
+        legal_incoherent     법리 불일치
+        truth_suppressed     진실 억압
+        revolving_door_active 전관예우 작동
+        media_capture        언론 포획
+        constitutional_breach 헌법 위기
+        verdict_unjust       판결 불공정 (방향 무관 절대 괴리)
+        collusion_suspected  검-판 유착
+        jury_compromised     배심원 오염
+
+    § 방향성 플래그 (2개):
+        over_convicted       억울한 유죄 — 판결이 실제보다 과도하게 유죄
+        unjust_acquittal     부당 방면 — 실제 유죄이나 무죄·경감 판결
+    """
     T, E, L, B, P = (
         state.truth_score,
         state.evidence_integrity,
@@ -251,18 +296,24 @@ def compute_flags(
         state.bias_total,
         state.procedural_score,
     )
+    signed_gap = derived["signed_justice_gap"]
+
     return {
+        # ── 기본 11개 ──
         "evidence_tampered":     E < 0.35,
         "bias_critical":         B > 0.65,
         "procedural_violation":  P < 0.35,
         "legal_incoherent":      L < 0.35,
         "truth_suppressed":      T < 0.30,
-        "revolving_door_active": derived["revolving_door_index"] > 0.35,
+        "revolving_door_active": derived["revolving_door_index"] > 0.25,
         "media_capture":         ctx.media_pressure > 0.65,
         "constitutional_breach": derived["constitutional_integrity"] < 0.55,
         "verdict_unjust":        derived["justice_gap"] > 0.40,
         "collusion_suspected":   derived["collusion_risk"] > 0.45,
         "jury_compromised":      derived["jury_bias_raw"] > 0.40,  # weight 미적용 원시 편향
+        # ── 방향성 2개 ──
+        "over_convicted":        signed_gap > 0.25,   # 억울: 판결 > 실제유죄 + 0.25
+        "unjust_acquittal":      signed_gap < -0.25,  # 방면: 판결 < 실제유죄 − 0.25
     }
 
 
