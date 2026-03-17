@@ -217,7 +217,7 @@ hierarchy_integrity = 가중 평균 → legal_coherence 자연 수렴점
 ### 전역 Ω
 
 ```
-Ω_global = Ω_truth×0.30 + Ω_evidence×0.25 + Ω_legal×0.20 + Ω_bias×0.15 + Ω_proc×0.10
+Ω_global = Ω_truth×0.30 + Ω_evidence×0.25 + Ω_legal×0.20 + Ω_bias×0.15 + Ω_procedural×0.10
 
 판정: JUST(≥0.80) / STABLE(0.60~) / FRAGILE(0.40~) / CRITICAL(<0.40)
 ```
@@ -265,11 +265,13 @@ hierarchy_integrity = 가중 평균 → legal_coherence 자연 수렴점
 
 ## 11개 위험 플래그
 
+> **주의**: `procedural_violation`은 **상태 플래그**(P < 0.35 감지)와 **이벤트 충격**(P ↓0.25 직접 주입) 두 가지로 사용된다. 혼동 주의.
+
 | 플래그 | 조건 | 의미 |
 |--------|------|------|
 | `evidence_tampered` | E < 0.35 | 증거 훼손 |
 | `bias_critical` | B > 0.65 | 심각 편향 |
-| `procedural_violation` | P < 0.35 | 절차 위반 |
+| `procedural_violation` *(상태 플래그)* | P < 0.35 | 절차 위반 감지 |
 | `legal_incoherent` | L < 0.35 | 법리 불일치 |
 | `truth_suppressed` | T < 0.30 | 진실 억압 |
 | `revolving_door_active` | revolving_door_index > 0.35 | 전관예우 동작 |
@@ -309,8 +311,9 @@ hierarchy_integrity = 가중 평균 → legal_coherence 자연 수렴점
    24  1.000  1.000  0.483  0.601  0.321    0.584  0.216   0.685      STABLE
 
   최종 진단: 절차 위반, 배심원 오염 경고
-  → T·E 조기 포화 (전관예우 없는 증거 발현), B(편향) 지속 상승, P(절차) 저하
-  → 구조 변수(revolving_door, political_pressure) 해소 없으면 STABLE 고착
+  → T·E 조기 포화 (전관예우는 T·E 발현 자체를 막지 못함)
+  → 그러나 B(편향) 지속 상승 + P(절차) 저하 → verdict_score 억제 → Ω 정체
+  → T·E가 1.0이어도 B가 크면 JUST 도달 불가 — 구조 변수 해소 없이 STABLE 고착
 
 시나리오 B: 증거 조작(stp3) → 사법 개혁(stp12) → 위헌 심사(stp18)
 
@@ -338,17 +341,20 @@ hierarchy_integrity = 가중 평균 → legal_coherence 자연 수렴점
 ## 설치 및 사용
 
 ```bash
-# legal_engine 이름으로 클론 (import 경로 자동 설정)
+# 1단계: legal_engine 이름으로 클론 (패키지 이름 자동 설정)
 git clone https://github.com/qquartsco-svg/LAW.git legal_engine
-cd legal_engine
 
-# 테스트 실행 (의존성: pytest만 필요)
-python -m pytest tests/test_legal.py -v
+# 2단계: legal_engine/ 의 부모 디렉토리에서 실행
+#   예시: ~/projects/legal_engine/ 에 클론했다면 ~/projects/ 에서 아래 명령 실행
+cd ..                               # legal_engine/ 의 부모로 이동
+
+# 테스트 (의존성: pytest만 필요)
+python -m pytest legal_engine/tests/test_legal.py -v
 ```
 
 ```python
 import sys
-sys.path.insert(0, "/path/to/parent")   # legal_engine/ 폴더의 부모 디렉토리
+sys.path.insert(0, ".")   # legal_engine/ 의 부모 디렉토리를 sys.path에 추가
 
 from legal_engine import LegalEngine, JudicialEvent
 
@@ -399,6 +405,7 @@ print(summary["advice"])
 
 | 버전 | 날짜 | 내용 |
 |------|------|------|
+| **v0.1.2** | 2026-03-17 | README 문서 정밀화 — Ω_proc→Ω_procedural 표기 통일, 시나리오A 문장 교정(전관예우 T·E 억제 메커니즘), 설치 실행 위치 명시, procedural_violation 플래그·이벤트 이중 사용 구분 표시 |
 | **v0.1.1** | 2026-03-17 | README 동기화 — 시나리오 A/B 실제 실행 결과 갱신, ODE 수식 정오, jury_compromised 플래그 weight 독립 계산, import 예시 수정 |
 | **v0.1.0** | 2026-03-17 | 초기 구현 — 상태·동역학·Observer·이벤트·엔진, 52 테스트 PASS |
 
