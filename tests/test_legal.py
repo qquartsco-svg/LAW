@@ -17,6 +17,13 @@ tests/test_legal.py — Legal Engine 전체 테스트
    — Ω_bias revolving 정규화 (max=1.0)
    — jury deliberation_quality ODE 반영
    — diagnose() 방향성 메시지
+§8 v0.4.0 법규범 자체 정합성 분석 (18개)
+   — StatuteProfile: norm_integrity, proportionality_score
+   — ConstitutionalAnalysis: constitutional_quality
+   — analyze_norms(): Ω_norm, 플래그, 진단
+   — observe() 6-layer Ω 통합
+   — diagnose() norm_report 통합
+   — diagnose_statute() 개별 법령 진단
 """
 from __future__ import annotations
 
@@ -41,6 +48,10 @@ from legal_engine.pharaoh_decree_legal import (
     JudicialEvent, JudicialCourt, recommend_event,
 )
 from legal_engine.legal_engine import LegalEngine, KOREA_CRIMINAL_PRESET, NEUTRAL_PRESET
+from legal_engine.legal_norm_analyzer import (
+    StatuteProfile, ConstitutionalAnalysis,
+    analyze_norms, diagnose_statute,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -700,3 +711,182 @@ class TestV020:
         if obs["flags"].get("unjust_acquittal"):
             advice = diagnose(obs)
             assert any("방면" in a or "acquittal" in a.lower() for a in advice)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# §8  v0.4.0 — 법규범 자체 정합성 분석 (18개)
+# ─────────────────────────────────────────────────────────────────────────────
+class TestNormAnalyzer:
+    """§8 — 법규범 자체 정합성: StatuteProfile, ConstitutionalAnalysis, analyze_norms()"""
+
+    # ── StatuteProfile ───────────────────────────────────────────────────────
+
+    def test_statute_norm_integrity_range(self):
+        """norm_integrity() 반환값은 [0, 1] 범위."""
+        s = StatuteProfile()
+        assert 0.0 <= s.norm_integrity() <= 1.0
+
+    def test_statute_proportionality_score_average(self):
+        """proportionality_score = (suitability + necessity + proportionality_stricto) / 3."""
+        s = StatuteProfile(suitability=0.60, necessity=0.80, proportionality_stricto=0.40)
+        expected = (0.60 + 0.80 + 0.40) / 3.0
+        assert abs(s.proportionality_score() - expected) < 1e-9
+
+    def test_statute_high_conflict_lowers_integrity(self):
+        """higher_norm_conflict 높을수록 norm_integrity 낮아짐."""
+        s_low  = StatuteProfile(higher_norm_conflict=0.05)
+        s_high = StatuteProfile(higher_norm_conflict=0.90)
+        assert s_low.norm_integrity() > s_high.norm_integrity()
+
+    def test_statute_low_clarity_lowers_integrity(self):
+        """clarity_score 낮을수록 norm_integrity 낮아짐."""
+        s_clear = StatuteProfile(clarity_score=0.90)
+        s_vague = StatuteProfile(clarity_score=0.10)
+        assert s_clear.norm_integrity() > s_vague.norm_integrity()
+
+    # ── ConstitutionalAnalysis ───────────────────────────────────────────────
+
+    def test_constitutional_quality_range(self):
+        """constitutional_quality() 반환값은 [0, 1] 범위."""
+        c = ConstitutionalAnalysis()
+        assert 0.0 <= c.constitutional_quality() <= 1.0
+
+    def test_constitutional_emergency_abuse_lowers_quality(self):
+        """emergency_abuse_risk 높을수록 constitutional_quality 낮아짐."""
+        c_safe = ConstitutionalAnalysis(emergency_abuse_risk=0.05)
+        c_risk = ConstitutionalAnalysis(emergency_abuse_risk=0.90)
+        assert c_safe.constitutional_quality() > c_risk.constitutional_quality()
+
+    def test_constitutional_full_rights_improves_quality(self):
+        """fundamental_rights_coverage 높을수록 quality 향상."""
+        c_low  = ConstitutionalAnalysis(fundamental_rights_coverage=0.20)
+        c_high = ConstitutionalAnalysis(fundamental_rights_coverage=0.95)
+        assert c_high.constitutional_quality() > c_low.constitutional_quality()
+
+    # ── analyze_norms() 플래그 ───────────────────────────────────────────────
+
+    def test_unconstitutional_flag_when_conflict_high(self):
+        """higher_norm_conflict > 0.50 → law_unconstitutional 플래그."""
+        s = StatuteProfile(name="위헌법", higher_norm_conflict=0.70)
+        report = analyze_norms([s])
+        assert report["flags"]["law_unconstitutional"] is True
+        assert "위헌법" in report["unconstitutional_laws"]
+
+    def test_vague_flag_when_clarity_low(self):
+        """clarity_score < 0.35 → law_vague 플래그."""
+        s = StatuteProfile(name="모호법", clarity_score=0.20)
+        report = analyze_norms([s])
+        assert report["flags"]["law_vague"] is True
+        assert "모호법" in report["vague_laws"]
+
+    def test_disproportionate_flag_when_prop_low(self):
+        """proportionality_score() < 0.35 → law_disproportionate 플래그."""
+        s = StatuteProfile(name="과잉법", suitability=0.10, necessity=0.10, proportionality_stricto=0.10)
+        report = analyze_norms([s])
+        assert report["flags"]["law_disproportionate"] is True
+
+    def test_constitutional_crisis_emergency_abuse(self):
+        """emergency_abuse_risk > 0.70 → constitutional_crisis 플래그."""
+        c = ConstitutionalAnalysis(emergency_abuse_risk=0.80)
+        report = analyze_norms([], constitution=c)
+        assert report["flags"]["constitutional_crisis"] is True
+
+    def test_constitutional_crisis_internal_inconsistency(self):
+        """internal_consistency < 0.40 → constitutional_crisis 플래그."""
+        c = ConstitutionalAnalysis(internal_consistency=0.30)
+        report = analyze_norms([], constitution=c)
+        assert report["flags"]["constitutional_crisis"] is True
+
+    # ── analyze_norms() Ω_norm ───────────────────────────────────────────────
+
+    def test_omega_norm_range(self):
+        """Ω_norm ∈ [0, 1]."""
+        report = analyze_norms([StatuteProfile()])
+        assert 0.0 <= report["Ω_norm"] <= 1.0
+
+    def test_omega_norm_high_for_clean_laws(self):
+        """완벽한 법령 + 헌법 → Ω_norm > 0.75."""
+        s = StatuteProfile(
+            clarity_score=0.95, suitability=0.95, necessity=0.95,
+            proportionality_stricto=0.95, rights_alignment=0.95,
+            higher_norm_conflict=0.02, purpose_clarity=0.95,
+        )
+        c = ConstitutionalAnalysis(
+            internal_consistency=0.95, democratic_legitimacy=0.95,
+            fundamental_rights_coverage=0.95, separation_of_powers=0.95,
+            emergency_abuse_risk=0.02, effectiveness=0.90,
+        )
+        report = analyze_norms([s], constitution=c)
+        assert report["Ω_norm"] > 0.75
+
+    def test_omega_norm_low_for_bad_laws(self):
+        """위헌·비례 위반·모호 법령 → Ω_norm < 0.40."""
+        s = StatuteProfile(
+            clarity_score=0.10, suitability=0.10, necessity=0.10,
+            proportionality_stricto=0.10, rights_alignment=0.10,
+            higher_norm_conflict=0.90,
+        )
+        c = ConstitutionalAnalysis(
+            internal_consistency=0.20, democratic_legitimacy=0.20,
+            fundamental_rights_coverage=0.20, emergency_abuse_risk=0.90,
+        )
+        report = analyze_norms([s], constitution=c)
+        assert report["Ω_norm"] < 0.40
+
+    def test_analyze_norms_empty_statutes_returns_const_quality(self):
+        """법령 없이 헌법만 → Ω_norm = constitutional_quality."""
+        c = ConstitutionalAnalysis()
+        report = analyze_norms([], constitution=c)
+        assert abs(report["Ω_norm"] - c.constitutional_quality()) < 1e-4
+        assert report["avg_statute_integrity"] is None
+
+    def test_diagnoses_populated_when_flags_active(self):
+        """플래그 작동 시 diagnoses에 경고 포함."""
+        c = ConstitutionalAnalysis(emergency_abuse_risk=0.85)
+        report = analyze_norms([], constitution=c)
+        assert len(report["diagnoses"]) >= 1
+        assert not report["diagnoses"][0].startswith("✅")
+
+    # ── observe() 6-layer 통합 ────────────────────────────────────────────────
+
+    def test_observe_with_norm_report_includes_omega_norm(self):
+        """norm_report 제공 시 관찰 결과에 Ω_norm 포함."""
+        s      = LegalMutable()
+        ctx    = LegalContext()
+        nr     = analyze_norms([StatuteProfile()])
+        obs    = observe(s, ctx, norm_report=nr)
+        assert "Ω_norm" in obs
+        assert 0.0 <= obs["Ω_norm"] <= 1.0
+
+    def test_observe_6layer_uses_different_weights(self):
+        """6-layer Ω_global ≠ 5-layer Ω_global (가중치 다름)."""
+        s      = LegalMutable()
+        ctx    = LegalContext()
+        obs5   = observe(s, ctx)
+        nr     = analyze_norms([StatuteProfile(
+            clarity_score=0.10, rights_alignment=0.10, higher_norm_conflict=0.90,
+        )])
+        obs6   = observe(s, ctx, norm_report=nr)
+        # Ω_norm이 낮으면 6-layer Ω_global이 5-layer보다 낮아야 함
+        assert obs6["Ω_global"] < obs5["Ω_global"]
+        assert obs6["n_layers"] == 6
+        assert obs5["n_layers"] == 5
+
+    # ── diagnose_statute() 개별 진단 ─────────────────────────────────────────
+
+    def test_diagnose_statute_clean_returns_ok(self):
+        """정합성 양호한 법령 → ✅ 반환."""
+        s = StatuteProfile(
+            clarity_score=0.90, suitability=0.90, necessity=0.90,
+            proportionality_stricto=0.90, rights_alignment=0.90,
+            higher_norm_conflict=0.05,
+        )
+        advice = diagnose_statute(s)
+        assert len(advice) == 1
+        assert advice[0].startswith("✅")
+
+    def test_diagnose_statute_unconstitutional_flagged(self):
+        """위헌 위험 법령 → 🔴 포함."""
+        s = StatuteProfile(name="테스트법", higher_norm_conflict=0.80)
+        advice = diagnose_statute(s)
+        assert any("🔴" in a for a in advice)

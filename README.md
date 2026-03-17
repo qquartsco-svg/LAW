@@ -731,18 +731,159 @@ for a in advice:
 
 ---
 
+## 법규범 자체 정합성 분석 (v0.4.0 신규)
+
+> **핵심 질문**: "사법 시스템이 법을 잘 적용하는가?" 와 별개로,
+> **"그 법 자체가 헌법 원칙에 부합하는가?"** 를 독립 평가한다.
+
+```
+관찰 대상의 두 층위:
+  Ω_truth ~ Ω_procedural  →  사법 과정의 공정성 (5개 레이어)
+  Ω_norm                  →  법규범 자체의 품질 (선택적 6번째 레이어)
+```
+
+### StatuteProfile — 개별 법령 정합성 프로파일
+
+| 파라미터 | 설명 | 측정 방법 |
+|---------|------|---------|
+| `clarity_score` | 명확성 원칙 | 불확정 개념 빈도 역산, 헌재 한정합헌 결정 빈도 |
+| `suitability` | 비례 원칙 — 적합성 | 수단이 목적 달성에 적합한가 (효과 연구) |
+| `necessity` | 비례 원칙 — 필요성 | 더 경한 수단 없는가 (비교법 분석) |
+| `proportionality_stricto` | 비례 원칙 — 상당성 | 공익 ↔ 기본권 균형 (법익 형량) |
+| `rights_alignment` | 기본권 정합성 | 헌법 기본권 카탈로그 매핑, 인권위 의견서 |
+| `higher_norm_conflict` | 상위법 충돌 위험 ↑ | 위헌 심사 청구율, 헌재 결정 이력 |
+| `purpose_clarity` | 입법 목적 명확성 | 입법이유서 구체성, 심의 기록 |
+
+```python
+s = StatuteProfile(
+    name="예시법",
+    clarity_score=0.45,             # 명확성 부족
+    suitability=0.70,
+    necessity=0.50,                 # 경한 수단 존재 가능성
+    proportionality_stricto=0.60,
+    rights_alignment=0.35,          # 기본권 제한 심각
+    higher_norm_conflict=0.55,      # 위헌 의심
+    purpose_clarity=0.70,
+)
+print(f"정합성: {s.norm_integrity():.3f}")  # → 0.525 수준
+```
+
+### ConstitutionalAnalysis — 헌법 자체 품질
+
+| 파라미터 | 가중치 | 설명 |
+|---------|--------|------|
+| `fundamental_rights_coverage` | 0.25 | 기본권 보장 범위 (ICCPR 대비) |
+| `separation_of_powers` | 0.20 | 권력분립 원칙 준수도 |
+| `internal_consistency` | 0.20 | 헌법 조항 간 내부 정합성 |
+| `democratic_legitimacy` | 0.15 | 제정·개정 민주적 정당성 |
+| `effectiveness` | 0.10 | 실효성 (헌재 인용률) |
+| `emergency_abuse_risk` ↑ | 0.10 | 비상권한 남용 위험 (역산) |
+
+### analyze_norms() — 종합 분석 + Ω_norm
+
+```python
+from legal_engine import StatuteProfile, ConstitutionalAnalysis, analyze_norms, observe
+
+# 분석 대상 법령 정의
+statutes = [
+    StatuteProfile(
+        name="국가보안법",
+        clarity_score=0.40,
+        rights_alignment=0.35,
+        higher_norm_conflict=0.60,   # 위헌 의심
+    ),
+    StatuteProfile(
+        name="형사소송법",
+        clarity_score=0.72,
+        rights_alignment=0.75,
+        higher_norm_conflict=0.12,
+    ),
+]
+
+# 헌법 분석
+constitution = ConstitutionalAnalysis(
+    fundamental_rights_coverage=0.78,
+    separation_of_powers=0.72,
+    internal_consistency=0.82,
+    democratic_legitimacy=0.65,
+    emergency_abuse_risk=0.35,
+)
+
+# 법규범 종합 분석
+norm_report = analyze_norms(statutes, constitution)
+print(f"Ω_norm:          {norm_report['Ω_norm']}")
+print(f"헌법 품질:        {norm_report['constitutional_quality']}")
+print(f"위헌 의심 법령:   {norm_report['unconstitutional_laws']}")
+print(f"비례 위반 법령:   {norm_report['disproportionate_laws']}")
+print(f"명확성 위반:      {norm_report['vague_laws']}")
+
+# 6-layer Ω (norm_report 제공)
+engine = LegalEngine(preset="korea")
+engine.simulate(steps=12)
+obs = observe(engine.state, engine.ctx, norm_report=norm_report)
+print(f"Ω_global (6레이어): {obs['Ω_global']}  판정: {obs['verdict']}")
+print(f"Ω_norm:            {obs['Ω_norm']}")
+print(f"n_layers:          {obs['n_layers']}")   # → 6
+
+# 법규범 포함 진단
+from legal_engine import diagnose
+advice = diagnose(obs, norm_report=norm_report)
+for a in advice:
+    print(a)
+```
+
+### Ω_norm 계산 공식
+
+```
+# 법령 있는 경우:
+Ω_norm = avg_statute_integrity × 0.45
+        + constitutional_quality × 0.40
+        + (1 − statute_conflict_index) × 0.15
+
+# 법령 없이 헌법만:
+Ω_norm = constitutional_quality
+
+# StatuteProfile.norm_integrity():
+norm_integrity = clarity_score × 0.25
+               + proportionality_score() × 0.30    # = (suit+nec+prop) / 3
+               + rights_alignment × 0.25
+               + (1 − higher_norm_conflict) × 0.15
+               + purpose_clarity × 0.05
+```
+
+### 6-layer Ω_global 가중치
+
+| 추가 조건 | Ω_truth | Ω_evidence | Ω_legal | Ω_bias | Ω_proc | **Ω_norm** |
+|---------|---------|-----------|---------|--------|--------|---------|
+| norm_report=None (5-layer) | 0.30 | 0.25 | 0.20 | 0.15 | 0.10 | — |
+| norm_report 제공 (6-layer) | 0.25 | 0.20 | 0.15 | 0.15 | 0.10 | **0.15** |
+
+> 6-layer에서도 강제 임계치 (CORRUPTED/COMPROMISED/DISTORTED)는 동일하게 작동.
+
+### 법규범 4개 위험 플래그
+
+| 플래그 | 조건 | 의미 |
+|--------|------|------|
+| `law_unconstitutional` | higher_norm_conflict > 0.50 | 위헌 의심 — 심사 청구 권고 |
+| `law_vague` | clarity_score < 0.35 | 명확성 원칙 위반 |
+| `law_disproportionate` | proportionality_score() < 0.35 | 비례 원칙 위반 |
+| `constitutional_crisis` | internal_consistency<0.40 OR democratic_legitimacy<0.40 OR emergency_abuse_risk>0.70 | 헌법 위기 |
+
+---
+
 ## 파일 구조
 
 ```
 legal_engine/
-├── __init__.py              — 공개 API (v0.2.0)
+├── __init__.py              — 공개 API (v0.4.0)
 ├── legal_state.py           — 상태·파생 지표·플래그(13개)·법률 계층·참여자 파라미터
 ├── legal_dynamics.py        — ODE 5개 + RK4 + 이벤트 충격 12종
-├── legal_observer.py        — Observer 5레이어 Ω + 강제 임계치 + 방향성 진단
+├── legal_observer.py        — Observer 5+1레이어 Ω + 강제 임계치 + 방향성 진단
+├── legal_norm_analyzer.py   — 법규범 자체 정합성 분석 (v0.4.0 신규)
 ├── legal_engine.py          — 엔진 (preset·simulate·report·summary)
 ├── pharaoh_decree_legal.py  — 이벤트 12종 + Athena 자동 권고 우선순위 트리
 └── tests/
-    └── test_legal.py        — 65 테스트 (§1~§7 전체 PASS)
+    └── test_legal.py        — 86 테스트 (§1~§8 전체 PASS)
 ```
 
 ---
@@ -751,6 +892,7 @@ legal_engine/
 
 | 버전 | 날짜 | 내용 |
 |------|------|------|
+| **v0.4.0** | 2026-03-17 | 법규범 자체 정합성 분석 모듈 추가. `legal_norm_analyzer.py` 신규: `StatuteProfile`(명확성·비례3단계·기본권·상위법·목적 6차원), `ConstitutionalAnalysis`(기본권·권력분립·내부정합·민주정당성·비상남용·실효성), `analyze_norms()` → Ω_norm+플래그4개+진단. `observe(norm_report=)` 선택적 6-layer Ω(0.25+0.20+0.15+0.15+0.10+0.15). `diagnose(norm_report=)` 법규범 진단 선행 통합. 86 테스트 PASS (§8 신규 18개) |
 | **v0.3.0** | 2026-03-17 | 파라미터 수치화 방법론 전면 구체화. evidence_integrity 점수표(12개 항목), 전관예우 3단계 프록시 계산법, 검-판 유착 수치 예시, actual_guilt 추정 3가지 방법(물증점수·재심역산·진술일관성), media_pressure 정규화, Calibration 4단계 절차, 공개 데이터 소스 표. legal_state.py 각 dataclass에 측정 방법론 주석 내장 |
 | **v0.2.0** | 2026-03-17 | 4단계·Observer 추상적 로직 보충보완. revolving_door_index 3요소 공식 통합(dynamics/state 불일치 해소), signed_justice_gap+verdict_direction 방향성 파생 지표 추가, 플래그 13개(over_convicted+unjust_acquittal), Ω_bias revolving 정규화 수정(max=1.0), DISTORTED 강제 임계치 추가(Ω≤0.70), dT/dt 배심 숙의 보조 항, diagnose() 방향성 처방 추가. 65 테스트 PASS |
 | **v0.1.2** | 2026-03-17 | README 정밀화 — Ω_proc→Ω_procedural 표기 통일, 시나리오A 문장 교정, procedural_violation 이중 사용 구분 표시 |
